@@ -1,0 +1,196 @@
+import re
+import logging
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import pandas as pd
+
+from parsers.base_parser import BaseParser, InvalidStatementException
+
+logger = logging.getLogger("AuraLedger")
+
+
+class HDFCPDFParser(BaseParser):
+    """
+    Dedicated parser for HDFC Bank's NetBanking-generated PDF account statements.
+
+    HDFC's PDF layout wraps long narrations across multiple physical lines within
+    the table (the renderer avoids column overflow by wrapping, rather than letting
+    text run into the next column), so `pdfplumber.extract_tables()` cannot
+    correctly split a page's transactions into separate rows -- it collapses them
+    all into one newline-joined blob per column.
+
+    It also turns out HDFC's header labels aren't x-aligned with where the actual
+    data starts (e.g. "Narration" is printed well to the right of where narration
+    text actually begins, which sits almost directly after the Date column) --
+    so a header-position-anchor approach misclassifies Date vs Narration. This
+    parser instead recognizes each column by its own content pattern (date,
+    long reference digits, money amounts) and only falls back to x-position for
+    the one thing content can't tell us: whether an amount is a debit or a credit.
+    """
+
+    HEADER_KEYWORDS = {"date", "narration"}
+    FOOTER_MARKERS = ("statementsummary", "generatedon", "registeredoffice", "closingbalanceincludes")
+    DATE_PATTERN = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+    MONEY_PATTERN = re.compile(r"^[\d,]+\.\d{2}$")
+    REF_PATTERN = re.compile(r"^\d{8,}$")
+    ROW_TOLERANCE = 3
+
+    def parse(self, file_path: Path) -> pd.DataFrame:
+        import pdfplumber
+
+        file_path = Path(file_path)
+        logger.info(f"Parsing HDFC PDF statement: {file_path}")
+
+        all_rows = []
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    words = page.extract_words()
+                    if words:
+                        all_rows.extend(self._extract_page_transactions(words))
+        except InvalidStatementException:
+            raise
+        except Exception as e:
+            raise InvalidStatementException(f"Error reading HDFC PDF: {e}")
+
+        if not all_rows:
+            raise InvalidStatementException(
+                "No transaction rows could be extracted from this HDFC PDF statement."
+            )
+
+        df = pd.DataFrame(all_rows, columns=["date", "narration", "reference", "debit", "credit", "balance"])
+        return self.common_cleanup(df)
+
+    def _extract_page_transactions(self, words: List[dict]) -> List[dict]:
+        lines = self._cluster_words_into_lines(words)
+
+        header_idx = None
+        for idx, line in enumerate(lines):
+            texts_lower = {w["text"].lower().strip(".:") for w in line}
+            if self.HEADER_KEYWORDS.issubset(texts_lower):
+                header_idx = idx
+                break
+
+        if header_idx is None:
+            # No transaction table on this page (e.g. a trailing summary-only page)
+            return []
+
+        withdrawal_span = self._header_span(lines[header_idx], "withdrawalamt")
+        deposit_span = self._header_span(lines[header_idx], "depositamt")
+
+        transactions = []
+        current = None
+
+        for line in lines[header_idx + 1:]:
+            texts = [w["text"] for w in line]
+            combined_upper = "".join(texts).upper()
+            if any(marker.upper() in combined_upper for marker in self.FOOTER_MARKERS):
+                break
+
+            if self.DATE_PATTERN.match(texts[0]):
+                parsed = self._parse_transaction_line(line, withdrawal_span, deposit_span)
+                if parsed:
+                    if current:
+                        transactions.append(current)
+                    current = parsed
+            elif current:
+                # Continuation line: pure narration overflow, no other columns present
+                current["narration"] = f"{current['narration']} {' '.join(texts)}".strip()
+
+        if current:
+            transactions.append(current)
+
+        return transactions
+
+    def _cluster_words_into_lines(self, words: List[dict]) -> List[List[dict]]:
+        """Groups words into physical lines by y-position, sorted left-to-right within each line."""
+        words = sorted(words, key=lambda w: w["top"])
+        lines: List[List[dict]] = []
+        current = [words[0]]
+        current_top = words[0]["top"]
+
+        for w in words[1:]:
+            if abs(w["top"] - current_top) <= self.ROW_TOLERANCE:
+                current.append(w)
+            else:
+                current.sort(key=lambda x: x["x0"])
+                lines.append(current)
+                current = [w]
+                current_top = w["top"]
+        current.sort(key=lambda x: x["x0"])
+        lines.append(current)
+        return lines
+
+    def _header_span(self, header_line: List[dict], keyword: str) -> Tuple[float, float]:
+        """Returns the (x0, x1) span of the header word matching `keyword` (normalized, no punctuation)."""
+        for w in header_line:
+            normalized = re.sub(r"[^a-z]", "", w["text"].lower())
+            if normalized == keyword:
+                return (w["x0"], w["x1"])
+        return (0.0, 0.0)
+
+    def _parse_transaction_line(
+        self, words: List[dict], withdrawal_span: Tuple[float, float], deposit_span: Tuple[float, float]
+    ) -> Optional[dict]:
+        texts = [w["text"] for w in words]
+
+        money_indices = [i for i, t in enumerate(texts) if self.MONEY_PATTERN.match(t)]
+        if len(money_indices) < 2:
+            logger.warning(f"Skipping malformed HDFC PDF transaction line (missing amount/balance): {texts}")
+            return None
+
+        balance_idx = money_indices[-1]
+        amount_idx = money_indices[-2]
+        balance = texts[balance_idx]
+        amount = texts[amount_idx]
+        amount_word = words[amount_idx]
+
+        debit, credit = self._classify_amount_direction(amount, amount_word["x0"], withdrawal_span, deposit_span)
+
+        value_dt_idx = amount_idx - 1
+        has_value_dt = value_dt_idx > 0 and self.DATE_PATTERN.match(texts[value_dt_idx])
+
+        ref_idx = None
+        search_end = value_dt_idx if has_value_dt else amount_idx
+        for i in range(1, search_end):
+            if self.REF_PATTERN.match(texts[i]):
+                ref_idx = i
+        reference = texts[ref_idx] if ref_idx is not None else ""
+
+        narration_end_idx = ref_idx if ref_idx is not None else search_end
+        narration = " ".join(texts[1:narration_end_idx]) if narration_end_idx > 1 else ""
+
+        return {
+            "date": texts[0],
+            "narration": narration,
+            "reference": reference,
+            "debit": debit,
+            "credit": credit,
+            "balance": balance,
+        }
+
+    def _classify_amount_direction(
+        self, amount: str, amount_x0: float, withdrawal_span: Tuple[float, float], deposit_span: Tuple[float, float]
+    ) -> Tuple[str, str]:
+        """
+        Determines whether a transaction amount is a debit (withdrawal) or credit
+        (deposit) by checking which header column's x-span it falls under -- the
+        one thing this parser needs position for, since content alone can't
+        distinguish a withdrawal amount from a deposit amount.
+        """
+        in_withdrawal = withdrawal_span[0] <= amount_x0 <= withdrawal_span[1]
+        in_deposit = deposit_span[0] <= amount_x0 <= deposit_span[1]
+
+        if in_withdrawal and not in_deposit:
+            return amount, ""
+        if in_deposit and not in_withdrawal:
+            return "", amount
+
+        # Ambiguous (falls in both/neither span, e.g. very short header words) -- fall
+        # back to whichever column center is closer.
+        withdrawal_center = (withdrawal_span[0] + withdrawal_span[1]) / 2
+        deposit_center = (deposit_span[0] + deposit_span[1]) / 2
+        if abs(amount_x0 - withdrawal_center) <= abs(amount_x0 - deposit_center):
+            return amount, ""
+        return "", amount

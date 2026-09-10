@@ -1,0 +1,49 @@
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Build / packaging artifacts
+build/
+dist/
+
+# Runtime output & logs (may contain real client data)
+logs/
+output/
+cache/
+
+# Real bank statement samples — do not commit client data (recursive: input/ has
+# subfolders like input/excel/, input/pdf/, and may gain more)
+input/**/*.xls
+input/**/*.xlsx
+input/**/*.csv
+input/**/*.pdf
+input/**/~$*
+
+# Scratch/dev
+scratch/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Coverage / packaging
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/

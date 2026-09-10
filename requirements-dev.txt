@@ -1,0 +1,13 @@
+# Desktop packaging + testing -- for local development / building the
+# Windows desktop package only. Never installed on Streamlit Cloud.
+-r requirements.txt
+
+# Desktop launcher / system tray
+pystray
+
+# Desktop packaging (build-time only)
+pyinstaller
+
+# Testing
+pytest
+reportlab==5.0.1

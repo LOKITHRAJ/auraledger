@@ -1,0 +1,31 @@
+# Core app
+streamlit==1.55.0
+pandas==2.2.3
+openpyxl==3.1.5
+xlrd==2.0.2
+python-dotenv==1.1.0
+pydantic==2.11.5
+
+# AI providers
+google-genai==2.8.0
+openai==2.26.0
+
+# Charts
+plotly==6.6.0
+
+# Auth (password hashing)
+bcrypt==4.3.0
+
+# PDF/OCR ingestion (also needs the Tesseract OCR and Poppler system binaries --
+# on Streamlit Cloud these come from packages.txt; locally see README.md).
+# Pillow is a real runtime dependency here too (pdf2image returns PIL Images),
+# not just a desktop-launcher concern.
+pdfplumber==0.11.10
+pytesseract==0.3.13
+pdf2image==1.17.0
+pillow==12.1.1
+
+# Everything below this line is desktop-packaging / test-only -- NOT needed to
+# run the Streamlit app itself (locally or on Streamlit Cloud). Kept out of
+# this file on purpose so a cloud deploy's `pip install -r requirements.txt`
+# only pulls what app.py actually needs. See requirements-dev.txt.
