@@ -1,6 +1,7 @@
 import streamlit as st
 from services.authentication import login
 from config.config_manager import ConfigManager
+from config import settings
 from components.theme import COLORS
 
 def show_login():
@@ -10,8 +11,16 @@ def show_login():
     config_mgr = ConfigManager()
     saved_key = config_mgr.get_api_key()
 
-    # Force setup if no API key is saved locally
-    is_first_run = not saved_key
+    # ai_client.py already prefers settings.GEMINI_API_KEY/OPENAI_API_KEY (.env
+    # locally, st.secrets on Streamlit Cloud) over this local encrypted-storage
+    # key, falling back to the latter only when neither is set. The wizard
+    # should follow the same precedence -- otherwise a Cloud deploy with the
+    # key already in Secrets still forces every visitor through local setup,
+    # which then tries to persist to the container's shared, ephemeral disk.
+    env_key_present = bool(settings.GEMINI_API_KEY or settings.OPENAI_API_KEY)
+
+    # Force setup only if no API key is available from either source
+    is_first_run = not saved_key and not env_key_present
 
     st.markdown(f"""
         <style>

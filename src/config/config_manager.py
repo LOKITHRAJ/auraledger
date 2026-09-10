@@ -12,6 +12,14 @@ try:
     import ctypes
     from ctypes import wintypes
 
+    # ctypes.windll only exists on Windows -- everything below only references
+    # it inside function bodies, so without this check the import itself
+    # "succeeds" on Linux/Mac too, and the AttributeError only surfaces later
+    # at call time, where it gets silently swallowed by get_api_key()/
+    # set_api_key()'s own error handling instead of falling back to Base64.
+    if not hasattr(ctypes, "windll"):
+        raise RuntimeError("ctypes.windll is only available on Windows")
+
     class DATA_BLOB(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
 
